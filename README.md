@@ -1,2 +1,2 @@
 # orbit
-A web-based GPU accelerated gravity particle sim
+A web-based gravity particle sim
