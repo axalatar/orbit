@@ -1,92 +1,122 @@
 <html>
-   <head> </head>
+   <head>
+      <title>Orbit</title>
+   </head>
    <body style="margin:0">
+      <!-- help from https://codelabs.developers.google.com/your-first-webgpu-app -->
       <canvas id = "canvas"></canvas>
-      <script>
+      <div id="error"></div>
+      <script type="module">
          var canvas = document.getElementById('canvas');
-         const ctx = canvas.getContext("2d");
+         var errorDiv = document.getElementById('error');
+         
+         if(!navigator.gpu) {
+            error.innerHTML = "WebGPU is not supported on this browser ); try looking at one of these: https://caniuse.com/webgpu"
+            throw Error("WebGPU is not supported on this browser ); try looking at one of these: https://caniuse.com/webgpu")
+         }
+
+         const adapter = await navigator.gpu.requestAdapter();
+
+         if(!adapter) {
+            error.innerHTML = "No appropriate GPUAdapter found ); maybe try looking at one of these?: https://caniuse.com/webgpu"
+            throw Error("WebGPU is not supported on this browser ); try looking at one of these: https://caniuse.com/webgpu")
+         }
 
          canvas.width = window.innerWidth;
          canvas.height = window.innerHeight;
 
-         ctx.fillStyle = "black";
-         ctx.fillRect(0, 0, canvas.width, canvas.height);
+         const device = await adapter.requestDevice();
+
+         const ctx = canvas.getContext("webgpu");
+         const canvasFormat = navigator.gpu.getPreferredCanvasFormat();
 
 
-         var masses = [];
+         const G = 0.001;
 
-         var G = 0.0000000000000000001;
+         ctx.configure({
+            device: device,
+            format: canvasFormat
+         })
 
-         let holding = false;
-         canvas.addEventListener('mousedown', (e) => {
-         holding = true;
-         });
+         const vertices = new Float32Array([
+            0.5, 0.5,
+            -0.5, 0.5,
+            -0.5, -0.5,
+
+            -0.5, -0.5,
+            0.5, -0.5,
+            0.5, 0.5
+         ])
+
+         const vertexBuffer = device.createBuffer({
+            label: "Body vertices",
+            size: vertices.byteLength,
+            usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST
+         })
+
+         device.queue.writeBuffer(vertexBuffer, 0, vertices);
+
          
-         canvas.addEventListener('mouseup', (e) => {
-         holding = false;
+         const vertexBufferLayout = {
+            arrayStride: 8,
+            attributes: [{
+               format: "float32x2",
+               offset: 0,
+               shaderLocation: 0
+            }]
+         }
+
+         const bodyShaderModule = device.createShaderModule({
+            label: "Body shader",
+            code: `
+               @vertex
+               fn vertexMain(@location(0) pos: vec2f) -> @builtin(position) vec4f {
+                  return vec4f(pos, 0, 1);
+               }
+
+               @fragment
+               fn fragmentMain() -> @location(0) vec4f {
+                  return vec4f(1, 0, 0, 1);
+               }
+            `
          });
 
-         canvas.addEventListener('mousemove', (e) => {
-            if(holding) {
-               masses.push([e.offsetX, e.offsetY, 0, 0])
+         const bodyPipeline = device.createRenderPipeline({
+            lable: "Body pipeline",
+            layout: "auto",
+            vertex: {
+               module: bodyShaderModule,
+               entryPoint: "vertexMain",
+               buffers: [vertexBufferLayout]
+            },
+            fragment: {
+               module: bodyShaderModule,
+               entryPoint: "fragmentMain",
+               targets: [{
+                  format: canvasFormat
+               }]
+            },
+            primitive: {
+               topology: 'point-list',
             }
          })
 
-         function pixel(x, y, c) {
-            ctx.fillStyle = c;
-            ctx.fillRect( x, y, 1, 1 );
-         }
+         const encoder = device.createCommandEncoder();
+         const pass = encoder.beginRenderPass({
+            colorAttachments: [{
+               view: ctx.getCurrentTexture().createView(),
+               loadOp: "clear",
+               storeOp: "store"
+            }]
+         })
 
-         function update_pos(i) {
-            // update pos of mass at index i
-            let x1 = masses[i][0]
-            let y1 = masses[i][1]
+         pass.setPipeline(bodyPipeline);
+         pass.setVertexBuffer(0, vertexBuffer);
+         pass.draw(vertices.length / 2);
 
-            let vx = masses[i][2]
-            let vy = masses[i][3]
+         pass.end()
 
-            masses[i][0] += masses[i][2]
-            masses[i][1] += masses[i][3]
-
-
-            for(let i = 0; i < masses.length; i++) {
-               let x2 = masses[i][0];
-               let y2 = masses[i][1]
-
-               let distsq = Math.pow(x1 - x2, 2) + Math.pow(y1 - y2, 2);
-
-               if(!isFinite(distsq) || distsq <= 0) continue;
-
-               let force = G / distsq;
-
-               let dist = Math.sqrt(distsq)
-
-               let x = force * (x2 / dist);
-               let y = force * (y2 / dist);
-               
-               masses[i][2] += 0.1;
-               masses[i][3] += y;
-            }
-
-            if(x1 > canvas.width || y1 > canvas.height || x1 < 0 || y1 < 0) {
-               return false;
-            }
-            return true;
-         }
-
-
-         setInterval(() => {
-            for(let i = masses.length-1; i >= 0; i--) {
-               pixel(masses[i][0], masses[i][1], 'black')
-               if(update_pos(i)) {
-                  pixel(masses[i][0], masses[i][1], 'white')
-               }
-               else {
-                  masses.splice(i, 1)
-               }
-               console.log(masses.length)
-            }
-         }, 1000)
+         device.queue.submit([encoder.finish()])
       </script>
    </body>
 </html>

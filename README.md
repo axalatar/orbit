@@ -1,2 +1,2 @@
 # orbit
-A web-based gravity particle sim
+A WebGPU gravity particle sim
