@@ -21,7 +21,7 @@
 
       if (!adapter) {
          error.innerHTML = "No appropriate GPUAdapter found ); maybe try looking at one of these?: https://caniuse.com/webgpu"
-         throw Error("WebGPU is not supported on this browser ); try looking at one of these: https://caniuse.com/webgpu")
+         throw Error("No appropriate GPUAdapter found ); maybe try looking at one of these?: https://caniuse.com/webgpu")
       }
 
       canvas.width = window.innerWidth;
@@ -34,7 +34,12 @@
 
 
       const G = 0.001;
-      const colorScale = 0.1;
+      const COLOR_SCALE = 0.1;
+
+      const WORKGROUP_SIZE = 8;
+
+
+      const MAX_BODIES = device.limits.maxComputeWorkgroupsPerDimension * 2;
 
       ctx.configure({
          device: device,
@@ -47,16 +52,6 @@
       //    0.5, -0.5,
       //    -0.5, -0.5,
       // ])
-
-      const vertices = new Float32Array(Array.from({length: 400000}, () => 2*Math.random() - 1));
-
-      const vertexBuffer = device.createBuffer({
-         label: "Body vertices",
-         size: vertices.byteLength,
-         usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST
-      })
-
-      device.queue.writeBuffer(vertexBuffer, 0, vertices);
 
       const gravityUniform = new Float32Array([G]);
       const uniformBuffer = device.createBuffer({
@@ -77,7 +72,8 @@
       }
 
 
-      const velocitiesStateArray = new Float32Array(vertices.length * 3);
+      const locationsStateArray = new Float32Array(Array.from({ length: 1000 }, () => 2 * Math.random() - 1));
+      const velocitiesStateArray = new Float32Array(locationsStateArray.length);
 
 
       const velocitiesStateStorage = [
@@ -92,6 +88,19 @@
             usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
          }),
       ];
+
+      const locationsStateStorage = [
+         device.createBuffer({
+            label: "Locations State A",
+            size: locationsStateArray.byteLength,
+            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.VERTEX,
+         }),
+         device.createBuffer({
+            label: "Locations State B",
+            size: locationsStateArray.byteLength,
+            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.VERTEX,
+         }),
+      ];
       // let wantedVelocities = [
       //    [1, 1, 1],
       //    [0, 0, 0],
@@ -104,19 +113,22 @@
       //    velocitiesStateArray[i * 3 + 2] = wantedVelocities[i][2];
       // }
 
-      for (let i = 0; i < velocitiesStateArray.length * 3; i++) {
+      for (let i = 0; i < velocitiesStateArray.length; i++) {
          velocitiesStateArray[i] = 0;
       }
 
       device.queue.writeBuffer(velocitiesStateStorage[0], 0, velocitiesStateArray);
       device.queue.writeBuffer(velocitiesStateStorage[1], 0, velocitiesStateArray);
 
+      device.queue.writeBuffer(locationsStateStorage[0], 0, locationsStateArray);
+      device.queue.writeBuffer(locationsStateStorage[1], 0, locationsStateArray);
+
 
       const bodyShaderModule = device.createShaderModule({
          label: "Body shader",
          code: `
                @group(0) @binding(0) var<uniform> G: f32;
-               @group(0) @binding(1) var<storage> velocities: array<vec3f>;
+               @group(0) @binding(1) var<storage> velocities: array<vec2f>;
 
                struct VertexOutput {
                   @builtin(position) pos: vec4f,
@@ -130,7 +142,7 @@
                   var output: VertexOutput;
 
                   output.pos = vec4f(pos, 0, 1);
-                  output.color = length(velocities[instance]);
+                  output.color = length(velocities[instance]) * 200;
                   return output;
                }
 
@@ -141,9 +153,88 @@
             `
       });
 
+      const simulationShaderModule = device.createShaderModule({
+         label: "N-Body Simulation Shader",
+         // code: `
+         //    @compute
+         //    @workgroup_size(${WORKGROUP_SIZE}, ${WORKGROUP_SIZE})
+         //    fn computeMain(@builtin(global_invocation_id) body_global_index: vec3u) {
+         //     }
+         //  `
+         code:
+         `
+            @group(0) @binding(1) var<storage> velocitiesIn: array<vec2f>;
+            @group(0) @binding(2) var<storage, read_write> velocitiesOut: array<vec2f>;
+
+            @group(0) @binding(3) var<storage> locationsIn: array<vec2f>;
+            @group(0) @binding(4) var<storage, read_write> locationsOut: array<vec2f>;
+
+            fn bodyIndex(body: vec2u) -> u32 {
+               return body.y * 32 + body.x;
+            }
+
+            @compute
+            @workgroup_size(${WORKGROUP_SIZE}, ${WORKGROUP_SIZE})
+            fn computeMain(@builtin(global_invocation_id) body_global_index: vec3u) {
+               var body_index: u32 = bodyIndex(body_global_index.xy);
+               var loc: vec2f = locationsIn[body_index];
+
+               var a: u32 = arrayLength(&locationsIn);
+
+               var totalForce = vec2f(0);
+               
+               
+               for(var i = 0; i < i32(a); i++) {
+                  if(i == i32(body_index)) {
+                     continue;
+                  }
+
+                  var loc2 = locationsIn[i];
+                  var dist = distance(loc, loc2);
+                  totalForce += normalize(loc2 - loc) / dist;
+
+                  // locationsOut[body_index] = locationsIn[body_index] * 0.999;
+               }
+               totalForce *= 0.00000001;
+               velocitiesOut[body_index] = velocitiesIn[body_index] + totalForce;
+               locationsOut[body_index] += velocitiesOut[body_index];
+            }
+            `
+      });
+
+      const bindGroupLayout = device.createBindGroupLayout({
+         label: "Body Bind Group Layout",
+         entries: [{
+            binding: 0,
+            visibility: GPUShaderStage.VERTEX | GPUShaderStage.COMPUTE | GPUShaderStage.FRAGMENT,
+            buffer: {} // G
+         }, {
+            binding: 1,
+            visibility: GPUShaderStage.VERTEX | GPUShaderStage.COMPUTE,
+            buffer: { type: "read-only-storage" } // velocity input
+         }, {
+            binding: 2,
+            visibility: GPUShaderStage.COMPUTE,
+            buffer: { type: "storage" } // velocity output
+         }, {
+            binding: 3,
+            visibility: GPUShaderStage.VERTEX | GPUShaderStage.COMPUTE,
+            buffer: { type: "read-only-storage" } // location input
+         }, {
+            binding: 4,
+            visibility: GPUShaderStage.COMPUTE,
+            buffer: { type: "storage" } // location output
+         },]
+      });
+
+      const pipelineLayout = device.createPipelineLayout({
+         label: "Body Pipeline Layout",
+         bindGroupLayouts: [ bindGroupLayout ],
+      });
+
       const bodyPipeline = device.createRenderPipeline({
-         label: "Body pipeline",
-         layout: "auto",
+         label: "Body Render Pipeline",
+         layout: pipelineLayout,
          vertex: {
             module: bodyShaderModule,
             entryPoint: "vertexMain",
@@ -161,10 +252,19 @@
          }
       })
 
+      const simulationPipeline = device.createComputePipeline({
+         label: "Simulation Pipeline",
+         layout: pipelineLayout,
+         compute: {
+            module: simulationShaderModule,
+            entryPoint: "computeMain",
+         }
+      });
+
       const bindGroups = [
          device.createBindGroup({
             label: "Body renderer bind group A",
-            layout: bodyPipeline.getBindGroupLayout(0),
+            layout: bindGroupLayout,
             entries: [
                {
                   binding: 0,
@@ -173,12 +273,24 @@
                {
                   binding: 1,
                   resource: { buffer: velocitiesStateStorage[0] }
+               },
+               {
+                  binding: 2,
+                  resource: { buffer: velocitiesStateStorage[1] }
+               },
+               {
+                  binding: 3,
+                  resource: { buffer: locationsStateStorage[0] }
+               },
+               {
+                  binding: 4,
+                  resource: { buffer: locationsStateStorage[1] }
                }
             ]
          }),
          device.createBindGroup({
             label: "Body renderer bind group B",
-            layout: bodyPipeline.getBindGroupLayout(0),
+            layout: bindGroupLayout,
             entries: [
                {
                   binding: 0,
@@ -187,6 +299,18 @@
                {
                   binding: 1,
                   resource: { buffer: velocitiesStateStorage[1] }
+               },
+               {
+                  binding: 2,
+                  resource: { buffer: velocitiesStateStorage[0] }
+               },
+               {
+                  binding: 3,
+                  resource: { buffer: locationsStateStorage[1] }
+               },
+               {
+                  binding: 4,
+                  resource: { buffer: locationsStateStorage[0] }
                }
             ]
          })
@@ -197,9 +321,23 @@
       let step = 0;
 
       function updateGrid() {
-         step++;
 
          const encoder = device.createCommandEncoder();
+
+         const computePass = encoder.beginComputePass();
+
+         computePass.setPipeline(simulationPipeline);
+         computePass.setBindGroup(0, bindGroups[step % 2]);
+         const workgroupCount = Math.ceil(locationsStateArray.length / WORKGROUP_SIZE);
+         computePass.dispatchWorkgroups(workgroupCount, workgroupCount);
+
+         // console.log()
+
+         computePass.end();
+
+
+         step++;
+
          const pass = encoder.beginRenderPass({
             colorAttachments: [{
                view: ctx.getCurrentTexture().createView(),
@@ -209,18 +347,19 @@
          })
 
          pass.setPipeline(bodyPipeline);
-         pass.setVertexBuffer(0, vertexBuffer);
+         pass.setVertexBuffer(0, locationsStateStorage[step % 2]);
 
          pass.setBindGroup(0, bindGroups[step % 2]);
 
-         pass.draw(vertices.length / 2);
+         pass.draw(locationsStateArray.length / 2);
 
          pass.end()
 
          device.queue.submit([encoder.finish()])
+         requestAnimationFrame(updateGrid);
       }
 
-      setInterval(updateGrid, UPDATE_INTERVAL);
+      requestAnimationFrame(updateGrid);
    </script>
 </body>
 
