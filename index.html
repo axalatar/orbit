@@ -7,7 +7,8 @@
 <body style="margin:0">
    <!-- help from https://codelabs.developers.google.com/your-first-webgpu-app -->
    <canvas id="canvas"></canvas>
-   <div id="error"></div>
+   <div id="message"></div>
+   <div id="example" style="display: none"><p>it's not perfect (my laptop's OBS software is awful) but here's a example of what it looks like if yours can't load:</p><video width="640" height="480" controls><source src="example.mp4" type="video/mp4"></video></div>
    <script type="module">
       var held = 0;
       var x = 0;
@@ -24,19 +25,25 @@
       }
 
       var canvas = document.getElementById('canvas');
-      var errorDiv = document.getElementById('error');
+      var exampleDiv = document.getElementById('example');
+      var messageDiv = document.getElementById('message');
+
 
       if (!navigator.gpu) {
-         error.innerHTML = "WebGPU is not supported on this browser ); try looking at one of these: https://caniuse.com/webgpu"
+         messageDiv.innerHTML = "WebGPU is not supported on this browser ); try looking at one of these: https://caniuse.com/webgpu"
+         exampleDiv.style.display = "block"
          throw Error("WebGPU is not supported on this browser ); try looking at one of these: https://caniuse.com/webgpu")
       }
 
       const adapter = await navigator.gpu.requestAdapter();
 
       if (!adapter) {
-         error.innerHTML = "No appropriate GPUAdapter found ); maybe try looking at one of these?: https://caniuse.com/webgpu"
+         messageDiv.innerHTML = "No appropriate GPUAdapter found ); maybe try looking at one of these?: https://caniuse.com/webgpu"
+         exampleDiv.style.display = "block"
          throw Error("No appropriate GPUAdapter found ); maybe try looking at one of these?: https://caniuse.com/webgpu")
       }
+
+      alert("Try holding left click on the canvas, and move your mouse around!")
 
       canvas.width = window.innerWidth;
       canvas.height = window.innerHeight;
@@ -300,7 +307,7 @@
 
       const bindGroups = [
          device.createBindGroup({
-            label: "Body renderer bind group A",
+            label: "Body Renderer Bind Group A",
             layout: bindGroupLayout,
             entries: [
                {
@@ -326,7 +333,7 @@
             ]
          }),
          device.createBindGroup({
-            label: "Body renderer bind group B",
+            label: "Body Renderer Bind Group B",
             layout: bindGroupLayout,
             entries: [
                {
@@ -373,20 +380,8 @@
             new_body[0] = clip_space_x;
             new_body[1] = clip_space_y;
             newBodyBuffer.unmap();
-            encoder.copyBufferToBuffer(newBodyBuffer, 0, locationsStateStorage[0], body_count * 4 * 2, 8);
-            encoder.copyBufferToBuffer(newBodyBuffer, 0, locationsStateStorage[1], body_count * 4 * 2, 8);
-
-            // maybe there should be a different buffer for this, but eh
-
-            // await newBodyBuffer.mapAsync(GPUMapMode.WRITE);
-            // const mappedRange2 = newBodyBuffer.getMappedRange();
-            // const new_body_velocity = new Float32Array(mappedRange2);
-
-            // new_body_velocity[0] = 0;
-            // new_body_velocity[1] = 0;
-            // newBodyBuffer.unmap();
-            // encoder.copyBufferToBuffer(newBodyBuffer, 0, velocitiesStateStorage[0], body_count * 4 * 2, 8);
-            // encoder.copyBufferToBuffer(newBodyBuffer, 0, velocitiesStateStorage[1], body_count * 4 * 2, 8);
+            encoder.copyBufferToBuffer(newBodyBuffer, 0, locationsStateStorage[0], body_count * 8, 8);
+            encoder.copyBufferToBuffer(newBodyBuffer, 0, locationsStateStorage[1], body_count * 8, 8);
          }
 
 
@@ -397,7 +392,6 @@
          const workgroupCount = Math.ceil(locationsStateArray.length / WORKGROUP_SIZE);
          computePass.dispatchWorkgroups(workgroupCount, workgroupCount);
 
-         // console.log()
 
          computePass.end();
 
