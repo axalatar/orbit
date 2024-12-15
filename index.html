@@ -9,6 +9,20 @@
    <canvas id="canvas"></canvas>
    <div id="error"></div>
    <script type="module">
+      var held = 0;
+      var x = 0;
+      var y = 0;
+      document.body.onmousedown = function () {
+         held++;
+      }
+      document.body.onmouseup = function () {
+         held--;
+      }
+      document.body.onmousemove = function (event) {
+         x = event.clientX;
+         y = event.clientY;
+      }
+
       var canvas = document.getElementById('canvas');
       var errorDiv = document.getElementById('error');
 
@@ -39,7 +53,8 @@
       const WORKGROUP_SIZE = 8;
 
 
-      const MAX_BODIES = device.limits.maxComputeWorkgroupsPerDimension * 2;
+      const MAX_BODIES = 500;
+      let body_count = 100;
 
       ctx.configure({
          device: device,
@@ -72,7 +87,7 @@
       }
 
 
-      const locationsStateArray = new Float32Array(Array.from({ length: 1000 }, () => 2 * Math.random() - 1));
+      const locationsStateArray = new Float32Array(MAX_BODIES * 2);
       const velocitiesStateArray = new Float32Array(locationsStateArray.length);
 
 
@@ -89,6 +104,7 @@
          }),
       ];
 
+
       const locationsStateStorage = [
          device.createBuffer({
             label: "Locations State A",
@@ -101,6 +117,12 @@
             usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.VERTEX,
          }),
       ];
+
+      const newBodyBuffer = device.createBuffer({
+         label: "New Body Staging Buffer",
+         size: 8,
+         usage: GPUBufferUsage.COPY_SRC | GPUBufferUsage.MAP_WRITE
+      })
       // let wantedVelocities = [
       //    [1, 1, 1],
       //    [0, 0, 0],
@@ -115,6 +137,12 @@
 
       for (let i = 0; i < velocitiesStateArray.length; i++) {
          velocitiesStateArray[i] = 0;
+      }
+      for (let i = 0; i < MAX_BODIES * 2; i++) {
+         locationsStateArray[i] = 2 * Math.random() - 1;
+         if (i >= body_count * 2) {
+            locationsStateArray[i] = 1000000;
+         }
       }
 
       device.queue.writeBuffer(velocitiesStateStorage[0], 0, velocitiesStateArray);
@@ -162,7 +190,7 @@
          //     }
          //  `
          code:
-         `
+            `
             @group(0) @binding(1) var<storage> velocitiesIn: array<vec2f>;
             @group(0) @binding(2) var<storage, read_write> velocitiesOut: array<vec2f>;
 
@@ -179,25 +207,34 @@
                var body_index: u32 = bodyIndex(body_global_index.xy);
                var loc: vec2f = locationsIn[body_index];
 
-               var a: u32 = arrayLength(&locationsIn);
 
                var totalForce = vec2f(0);
+
                
-               
-               for(var i = 0; i < i32(a); i++) {
+               if(loc.x <= 1000.0) {
+               for(var i = 0; i < i32(arrayLength(&locationsIn)); i++) {
                   if(i == i32(body_index)) {
                      continue;
                   }
 
                   var loc2 = locationsIn[i];
-                  var dist = distance(loc, loc2);
-                  totalForce += normalize(loc2 - loc) / dist;
+
+                  if(loc2.x <= 1000.0) {
+                     var distSq = pow(loc.x-loc2.x, 2) + pow(loc.y-loc2.y, 2);
+                     if(distSq >= 0.0001) {
+                        totalForce += normalize(loc2 - loc) / (distSq+0.001);
+                     }
+                  }
+                  
 
                   // locationsOut[body_index] = locationsIn[body_index] * 0.999;
                }
+               
+               
                totalForce *= 0.00000001;
                velocitiesOut[body_index] = velocitiesIn[body_index] + totalForce;
-               locationsOut[body_index] += velocitiesOut[body_index];
+               locationsOut[body_index] += velocitiesIn[body_index];
+            }
             }
             `
       });
@@ -229,7 +266,7 @@
 
       const pipelineLayout = device.createPipelineLayout({
          label: "Body Pipeline Layout",
-         bindGroupLayouts: [ bindGroupLayout ],
+         bindGroupLayouts: [bindGroupLayout],
       });
 
       const bodyPipeline = device.createRenderPipeline({
@@ -320,9 +357,38 @@
       const UPDATE_INTERVAL = 200;
       let step = 0;
 
-      function updateGrid() {
+      var temp = 0
 
+      async function updateGrid() {
          const encoder = device.createCommandEncoder();
+
+         if (held) {
+            body_count = (body_count + 1) % MAX_BODIES;
+            await newBodyBuffer.mapAsync(GPUMapMode.WRITE);
+            const mappedRange = newBodyBuffer.getMappedRange();
+            const new_body = new Float32Array(mappedRange);
+
+            let clip_space_x = (x / canvas.width) * 2 - 1;
+            let clip_space_y = -((y / canvas.height) * 2 - 1)
+            new_body[0] = clip_space_x;
+            new_body[1] = clip_space_y;
+            newBodyBuffer.unmap();
+            encoder.copyBufferToBuffer(newBodyBuffer, 0, locationsStateStorage[0], body_count * 4 * 2, 8);
+            encoder.copyBufferToBuffer(newBodyBuffer, 0, locationsStateStorage[1], body_count * 4 * 2, 8);
+
+            // maybe there should be a different buffer for this, but eh
+
+            // await newBodyBuffer.mapAsync(GPUMapMode.WRITE);
+            // const mappedRange2 = newBodyBuffer.getMappedRange();
+            // const new_body_velocity = new Float32Array(mappedRange2);
+
+            // new_body_velocity[0] = 0;
+            // new_body_velocity[1] = 0;
+            // newBodyBuffer.unmap();
+            // encoder.copyBufferToBuffer(newBodyBuffer, 0, velocitiesStateStorage[0], body_count * 4 * 2, 8);
+            // encoder.copyBufferToBuffer(newBodyBuffer, 0, velocitiesStateStorage[1], body_count * 4 * 2, 8);
+         }
+
 
          const computePass = encoder.beginComputePass();
 
